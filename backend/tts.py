@@ -29,16 +29,22 @@ TTS_SAMPLE_RATE = 24000    # Kokoro & OpenAI-family PCM are 24 kHz. VERIFY per m
 CHUNK_BYTES = 4096
 
 
-def speak(text: str, stop_event=None):
-    """Synthesise `text` and play it through the default output device.
+def synthesize(text: str, stop_event=None):
+    """Generator: synthesise `text`, yield raw int16 PCM @ 24 kHz as bytes.
 
-    Streams the audio: opens an output stream, then writes PCM chunks as they
-    arrive from the network. Honours stop_event for barge-in.
+    This is the synth CORE, with no output device attached — the Twilio path
+    has no local speaker, it pipes these bytes through resample -> mu-law ->
+    the phone. `speak()` (below) is the local-playback wrapper for offline
+    testing. Yielding bytes (not numpy) keeps the boundary simple: the Twilio
+    resampler (audioop) wants bytes, and `speak()` re-wraps them for sounddevice.
+
+    Each yielded chunk is a WHOLE number of int16 samples — the leftover-byte
+    carry below guarantees we never split a sample across two yields.
     """
     if not text or not text.strip():
         return
 
-    leftover = b""   # bytes carried over when a chunk ends mid-sample
+    leftover = b""   # bytes carried over when a network chunk ends mid-sample
 
     # with_streaming_response gives us the raw byte stream as it arrives,
     # rather than buffering the whole audio file first.
@@ -46,29 +52,41 @@ def speak(text: str, stop_event=None):
         model=TTS_MODEL,
         voice=TTS_VOICE,
         input=text,
-        response_format="pcm",       # raw int16 samples — directly playable
+        response_format="pcm",       # raw int16 samples
     ) as response:
-        # OutputStream is the speaker side of PortAudio. dtype int16 because
-        # that's what PCM is; mono because the voice is mono.
-        with sd.OutputStream(samplerate=TTS_SAMPLE_RATE, channels=1,
-                             dtype="int16") as out:
-            for chunk in response.iter_bytes(chunk_size=CHUNK_BYTES):
-                # barge-in: stop the instant the user starts talking
-                if stop_event is not None and stop_event.is_set():
-                    break
-                if not chunk:
-                    continue
+        for chunk in response.iter_bytes(chunk_size=CHUNK_BYTES):
+            # barge-in: stop the instant the user starts talking
+            if stop_event is not None and stop_event.is_set():
+                break
+            if not chunk:
+                continue
 
-                data = leftover + chunk
-                # keep only a whole number of int16 samples (2 bytes each);
-                # stash any trailing odd byte for the next chunk
-                usable = len(data) - (len(data) % 2)
-                leftover = data[usable:]
-                if usable == 0:
-                    continue
+            data = leftover + chunk
+            # network chunks don't land on 2-byte (int16) boundaries, so a
+            # sample can straddle two chunks. Emit only whole samples and carry
+            # the trailing odd byte forward — dropping it would desync every
+            # following sample by one byte and turn the rest into noise.
+            usable = len(data) - (len(data) % 2)
+            leftover = data[usable:]
+            if usable == 0:
+                continue
 
-                samples = np.frombuffer(data[:usable], dtype=np.int16)
-                out.write(samples.reshape(-1, 1))   # OutputStream wants (frames, channels)
+            yield data[:usable]
+
+
+def speak(text: str, stop_event=None):
+    """Synthesise `text` and play it through the default output device.
+
+    Thin wrapper around `synthesize()` for offline testing — opens a PortAudio
+    output stream and writes each PCM chunk as it arrives. Honours stop_event.
+    """
+    # OutputStream is the speaker side of PortAudio. dtype int16 because that's
+    # what PCM is; mono because the voice is mono.
+    with sd.OutputStream(samplerate=TTS_SAMPLE_RATE, channels=1,
+                         dtype="int16") as out:
+        for pcm_bytes in synthesize(text, stop_event=stop_event):
+            samples = np.frombuffer(pcm_bytes, dtype=np.int16)
+            out.write(samples.reshape(-1, 1))   # OutputStream wants (frames, channels)
 
 
 # ---------------------------------------------------------------------------
