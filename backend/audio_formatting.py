@@ -10,7 +10,6 @@ it comes back at the model's own rate (see tts.py).
 import io
 import wave
 import numpy as np
-import audioop
 
 # --- capture-side constants (mic -> VAD -> STT) ---------------------------
 SAMPLE_RATE = 16000        # Hz. Speech standard; what Whisper + Silero expect.
@@ -22,19 +21,6 @@ SAMPLE_WIDTH = 2           # bytes per int16 sample (16 bits / 8)
 VAD_FRAME_SAMPLES = 512
 FRAME_MS = 1000 * VAD_FRAME_SAMPLES / SAMPLE_RATE   # = 32.0 ms
 
-
-def mulawToPcm(raw_mulaw: bytes) -> bytes:
-    """Converts the raw mulaw (8kHz) audio signal to PCM (16KHz) signal"""
-    pcm_8k = audioop.ulaw2lin(raw_mulaw, 2)
-    pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
-    return pcm_16k 
-
-
-def PcmToMulaw(raw_pcm: bytes) -> bytes:
-    """Converts the raw PCM (16kHz) audio signal to mulaw (8kHz) signal """
-    pcm_8k, _ = audioop.ratecv(raw_pcm, 2, 1, 16000, 8000, None)
-    mulaw_8k = audioop.lin2ulaw(pcm_8k, 2)
-    return mulaw_8k
 
 def float_to_int16(audio_f32: np.ndarray) -> np.ndarray:
     """float32 in [-1, 1]  ->  int16 in [-32768, 32767].

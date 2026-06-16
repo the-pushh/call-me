@@ -31,6 +31,9 @@
 # Testing
 **/coverage/
 
+# Planning / generated files
+**/planning/
+
 # ---------- Python / FastAPI ----------
 __pycache__/
 *.py[cod]
