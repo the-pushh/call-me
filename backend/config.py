@@ -1,6 +1,7 @@
 from dotenv import load_dotenv
-load_dotenv()
 import os
+
+load_dotenv()
 
 TWILLIO_SID = os.getenv("TWILLIO_SID")
 TWILLIO_AUTH_TOKEN = os.getenv("TWILLIO_AUTH_TOKEN")
