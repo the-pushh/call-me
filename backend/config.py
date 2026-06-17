@@ -46,5 +46,5 @@ MIN_UTTERANCE_MS = 400
 # Hard cap on call length. Enforced CARRIER-SIDE by Twilio via the call's
 # `time_limit` param, not by a backend timer — Twilio then fires `stop` +
 # `completed`, giving us ONE teardown path for both hang-up and timeout.
-CALL_TIME_LIMIT = 60   # seconds
+CALL_TIME_LIMIT = 120   # seconds (the "2-minute cap" the UI advertises)
 

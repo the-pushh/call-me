@@ -14,6 +14,7 @@ from fastapi.responses import Response
 from twilio.rest import Client
 from twilio.twiml.voice_response import VoiceResponse, Connect
 
+import transcript_socket
 from config import (
     TWILLIO_SID,
     TWILLIO_AUTH_TOKEN,
@@ -50,6 +51,28 @@ async def place_call(to_number: str, persona: str) -> str:
     return call.sid
 
 
+async def hangup_call(call_sid: str) -> None:
+    """End a live call NOW — the in-app red button calls this.
+
+    Without it the UI would only close locally while Twilio kept the real phone
+    call up. Updating the call to `completed` tells Twilio to drop the line; it
+    then fires the usual `stop`/`completed` events so the session tears down the
+    one normal way. Blocking SDK -> to_thread, like place_call. Ignored if the
+    call already ended (Twilio 404s a finished call)."""
+    def _end():
+        try:
+            client.calls(call_sid).update(status="completed")
+        except Exception as e:
+            print(f"[hangup] {call_sid} already gone / failed: {e}")
+    await asyncio.to_thread(_end)
+
+
+@router.post("/hangup/{call_sid}")
+async def hangup_endpoint(call_sid: str):
+    await hangup_call(call_sid)
+    return Response(status_code=204)
+
+
 @router.api_route("/twiml", methods=["GET", "POST"])
 async def twiml_handler(request: Request):
     """Webhook Twilio hits on answer. We tell it to open a 2-way audio stream.
@@ -79,12 +102,32 @@ async def twiml_handler(request: Request):
 async def call_status(request: Request):
     """Twilio lifecycle events (initiated/ringing/answered/completed).
 
-    Step 1 just logs them. Mapping these to frontend states lands in Step 3 once
-    the watch socket exists.
+    These drive the screen BEFORE audio exists: ringing -> "calling" ring, and
+    completed -> "ended" (the only ended signal if the callee never answers, so
+    the screen resets home instead of hanging on the ring forever). The in-call
+    states (connected/listening/...) come from the orchestrator over the media
+    path; this just covers the call's outer edges.
     """
     form = await request.form()
     call_sid = form.get("CallSid")
     status = form.get("CallStatus")
     print(f"[call-status] {call_sid} -> {status}")
+
+    if status in ("initiated", "ringing"):
+        transcript_socket.push(call_sid, "state", value="calling")
+    elif status in ("no-answer", "busy", "failed", "canceled"):
+        # The callee never picked up (declined / busy / unreachable). Tell the
+        # screen so it can show "declined" instead of pretending a call happened.
+        transcript_socket.push(call_sid, "state", value="declined")
+    elif status == "completed":
+        # Distinguish the 2-minute cap from the caller hanging up early: Twilio
+        # reports the call's length. At/near the limit -> the cap fired; clearly
+        # short -> they hung up. Lets the screen show the right end message.
+        try:
+            duration = int(form.get("CallDuration") or 0)
+        except ValueError:
+            duration = 0
+        hit_cap = duration >= CALL_TIME_LIMIT - 3
+        transcript_socket.push(call_sid, "state", value="ended" if hit_cap else "hangup")
 
     return Response(status_code=204)

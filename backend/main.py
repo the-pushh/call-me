@@ -11,15 +11,23 @@ import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import telephony
 import media_socket
+import transcript_socket
+import feedback
 import audio_cache
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Hand the running event loop to the watch socket. Call events are produced
+    # on worker THREADS; push() needs this handle to hop them back onto the loop
+    # (call_soon_threadsafe) where the sockets live.
+    transcript_socket.set_loop(asyncio.get_running_loop())
+
     # Build the filler clips once, in the background, so the server is usable
     # immediately. If a call arrives before they're ready, that turn simply
     # skips the filler (get_filler returns None) — no error, just no "umm".
@@ -29,8 +37,20 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# The frontend (a different origin in dev — localhost:3000) calls POST /call and
+# opens the /watch socket. Permissive here because it's a local dev tool; lock
+# allow_origins down to the real frontend domain before any deploy.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(telephony.router)
 app.include_router(media_socket.ws_router)
+app.include_router(transcript_socket.router)
+app.include_router(feedback.router)
 
 
 class CallRequest(BaseModel):

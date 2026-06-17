@@ -28,6 +28,7 @@ import json
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from orchestrator import CallSession, STOP
+import transcript_socket
 
 ws_router = APIRouter()
 
@@ -67,9 +68,14 @@ async def media_ws(websocket: WebSocket):
                 call_sid = start.get("callSid")
                 print(f"[media] start sid={start['streamSid']} call={call_sid} persona={persona}")
 
+                # Every state/transcript event the session emits gets fanned to
+                # the browsers watching THIS call. The closure binds call_sid so
+                # the session itself stays ignorant of the watch socket.
+                emit = lambda event, **data: transcript_socket.push(call_sid, event, **data)
+
                 # call_sid lets the session collect the greeting pre-warmed
                 # during the ring (see audio_cache / main's /call endpoint).
-                session = CallSession(persona, call_sid=call_sid)
+                session = CallSession(persona, call_sid=call_sid, emit=emit)
                 session.stream_sid = start["streamSid"]
                 session.start()
                 sender_task = asyncio.create_task(_sender(websocket, session))

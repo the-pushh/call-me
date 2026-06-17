@@ -80,3 +80,6 @@ Thumbs.db
 # ---------- Misc ----------
 *.pem
 .env.vault
+
+# post-call visitor remarks (local data)
+backend/feedback.jsonl

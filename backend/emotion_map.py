@@ -80,13 +80,18 @@ def strip_all_tags(text: str) -> str:
 
 
 def to_display(text: str) -> str:
-    """Replace known tags with their emoji and drop unknown ones — for the
-    frontend / any on-screen consumer, so a raw `[tag]` is never shown."""
+    """Replace known tags with their emoji and drop everything else bracketed —
+    for the frontend / any on-screen consumer, so a raw `[tag]` is never shown.
+
+    Matches ANY `[...]` (not just single-word tokens) so a multi-word or off-map
+    tag the model improvises — `[so nostalgic]`, `[soft laugh]` — gets emoji'd if
+    its first word is known, else dropped. A bare bracket must never hit screen.
+    """
     def repl(m: re.Match) -> str:
-        token = m.group(1).lower()
-        if token in EMOTION_MAP:
-            return EMOTION_MAP[token]["emoji"]
-        if token in NONVERBALISMS:
-            return NONVERBALISMS[token]["emoji"]
+        for word in m.group(1).strip().lower().split():
+            if word in EMOTION_MAP:
+                return EMOTION_MAP[word]["emoji"]
+            if word in NONVERBALISMS:
+                return NONVERBALISMS[word]["emoji"]
         return ""
-    return _tidy(_TAG.sub(repl, text))
+    return _tidy(re.sub(r"\[([^\]]*)\]", repl, text))

@@ -33,6 +33,7 @@ from twilio_audio import mulaw_to_pcm16, Resampler, FrameAccumulator
 from brains import Brain
 from stt import transcribe
 import tts
+import emotion_map
 from greetings import pick_greeting
 import audio_cache
 
@@ -111,6 +112,10 @@ class CallSession:
 
         threading.Thread(target=_load_vad, daemon=True).start()
 
+        # The call is now live (Twilio bridged the audio). Tell the screen so it
+        # leaves the "calling" ring and shows the in-call view.
+        self._set_state("connected")
+
         # Greeting: the bot speaks first, then REMEMBERS it said so, so its first
         # real reply follows on from the opener. Prefer the version pre-warmed
         # during the ring (instant); fall back to live synthesis if it wasn't
@@ -123,11 +128,14 @@ class CallSession:
                 if self.stop_event.is_set():
                     break
                 self.outbound_q.put(chunk)
-            self.brain.add_assistant_message(text)
         else:
-            greeting = pick_greeting(self.persona)
-            self._speak(greeting)
-            self.brain.add_assistant_message(greeting)
+            text = pick_greeting(self.persona)
+            self._speak(text)
+        # The greeting is the bot's first line — show it in the transcript too
+        # (emoji-ised, never a raw tag), and remember it so the first reply
+        # follows on from the opener.
+        self.emit("assistant_sentence", text=emotion_map.to_display(text))
+        self.brain.add_assistant_message(text)
 
         # Must have the VAD before we can listen.
         vad_ready.wait()
@@ -169,8 +177,19 @@ class CallSession:
             # so the next turn starts from a clean mic, not a stale backlog.
             self._drain_inbound()
 
+        # Loop exited — teardown (hang-up, timeout, or disconnect). Tell the
+        # screen so it resets home. Best-effort: if the browser already closed
+        # its watch socket, push() just drops this.
+        self._set_state("ended")
+
     def _capture(self) -> np.ndarray | None:
-        """Block until the VAD reports a completed utterance, or teardown."""
+        """Block until the VAD reports a completed utterance, or teardown.
+
+        While listening we also push the caller's live mic LEVEL to the screen so
+        the waveform reacts to their actual voice (loud -> tall bars, silence ->
+        flat). Throttled so it doesn't flood the socket.
+        """
+        lvl_skip = 0
         while not self.stop_event.is_set():
             raw = self.inbound_q.get()
             if raw is STOP:
@@ -180,6 +199,13 @@ class CallSession:
             f32 = int16_to_float(np.frombuffer(pcm16, dtype=np.int16))
 
             for frame in self.acc.feed(f32):
+                # RMS = loudness of this 512-sample frame. Gain + clamp maps
+                # speech into a usable 0..1 for the bars. ~every 3rd frame (~100ms).
+                lvl_skip += 1
+                if lvl_skip % 3 == 0:
+                    rms = float(np.sqrt(np.mean(frame * frame)))
+                    self.emit("level", value=min(1.0, rms * 6.0))
+
                 result = self.capture_vad.process(frame)
                 # ndarray = utterance done. "start" is barge-in (Step 5) — here
                 # the caller is just beginning their turn, nothing to do yet.
@@ -212,7 +238,10 @@ class CallSession:
             if first:
                 brain_first_ms = (time.monotonic() - t_brain_start) * 1000
 
-            self.emit("assistant_sentence", text=sentence)
+            # Emoji-ise tags for the screen ([nostalgic] -> 🥹); a raw [tag] must
+            # never reach the transcript. The SPOKEN copy (sentence) keeps its tag
+            # so TTS can still act on it.
+            self.emit("assistant_sentence", text=emotion_map.to_display(sentence))
 
             if first:
                 # Capture how long synthesis takes to produce its first audio,
