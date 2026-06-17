@@ -14,7 +14,11 @@ client = OpenAI(
 MODEL = "meta-llama/llama-3.1-8b-instruct"
 PROVIDER_OPTS = {"sort": "throughput"}
 PERSONAS = {
-    "eve": "personas/eve.md" # TODO: Transfer the system prompt to the md file from prompts.py
+    "eve": "personas/eve.md",
+    "siddhartha": "personas/siddhartha.md",
+    "jeremiah": "personas/jeremiah.md",
+    "billie": "personas/billie.md",
+    "avni": "personas/avni.md"
 }
 
 def _load_persona(path):
@@ -115,7 +119,7 @@ class Brain:
 
         for chunk in stream:
             if stop_event is not None and stop_event.is_set():
-                inturrupted = True
+                interrupted = True
                 break
 
             if not chunk.choices:
@@ -160,7 +164,7 @@ class Brain:
             if spoken:
                 self.messages.append({"role": "assistant", "content": spoken })
             else:
-                self.messages.pop
+                self.messages.pop()
         else:
             self.messages.append({"role": "assistant", "content": full.strip()})
 

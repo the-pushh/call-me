@@ -22,11 +22,56 @@ const COUNTRY_CODES = [
 ];
 
 const contacts = [
-  { name: "Alex Rivera", role: "Tech Visionary", initials: "AR", color: "#3b82f6", description: "Alex is your go-to voice for all things tech. Sharp, fast-paced, and always up to date with the latest in AI, startups, and innovation.", personality: "Analytical · Direct · Energetic", responseType: "Concise & data-driven" },
-  { name: "Zara Moon", role: "Pop Sensation", initials: "ZM", color: "#a855f7", description: "Zara brings the vibes. Whether it's music, culture, or just keeping things light and fun, she keeps the conversation trendy and full of energy.", personality: "Playful · Expressive · Trendy", responseType: "Casual & conversational" },
-  { name: "Marcus Cole", role: "Business Legend", initials: "MC", color: "#22c55e", description: "Marcus speaks the language of growth. With decades of boardroom wisdom, he cuts through the noise and helps you think like an executive.", personality: "Confident · Strategic · Authoritative", responseType: "Structured & actionable" },
-  { name: "Priya Shah", role: "Wellness Guru", initials: "PS", color: "#f43f5e", description: "Priya is your calm in the chaos. She blends mindfulness, science, and warmth to help you feel grounded, heard, and inspired.", personality: "Warm · Thoughtful · Calming", responseType: "Empathetic & reflective" },
-  { name: "Jake Storm", role: "Adventure Creator", initials: "JS", color: "#f97316", description: "Jake lives for the next big thing. High energy, spontaneous, and always ready to push limits — he's the voice that gets you moving.", personality: "Bold · Spontaneous · Adventurous", responseType: "Enthusiastic & action-oriented" },
+  { 
+    name: "Eve Ryder", 
+    role: "Rolling Stone", 
+    initials: "ER", 
+    color: "#ec4899", 
+    description: "Eve is your go-to voice for a laid-back, rock-and-roll vibe. She's a curious soul who loves classic rock, poetry, and going down random tech rabbit holes, always bringing warmth and natural color to the conversation.", 
+    personality: "Laid-back · Warm · Curious", 
+    responseType: "Conversational & colorful",
+    personaCode: "eve"
+  },
+  { 
+    name: "Siddhartha", 
+    role: "Spiritual Guide", 
+    initials: "S", 
+    color: "#14b8a6", 
+    description: "Siddhartha is your go-to voice for deep calm and spiritual grounding. Unaffected by the chaos of the world, he approaches every conversation with peaceful acceptance, gentle warmth, and a quiet sense of wonder.", 
+    personality: "Peaceful · Grounded · Gentle", 
+    responseType: "Slow & mindful",
+    personaCode: "siddhartha"
+  },
+  { 
+    name: "Jeremiah Sterling", 
+    role: "Record Executive", 
+    initials: "JS", 
+    color: "#eab308", 
+    description: "Jeremiah is your go-to voice for business and elegance. As a sharp executive running a record label, he brings a sophisticated, polished confidence to discussions about finances, networking, and the mechanics of success.", 
+    personality: "Sophisticated · Confident · Pragmatic", 
+    responseType: "Smooth & calculated",
+    personaCode: "jeremiah"
+  },
+  { 
+    name: "Billie Hayes", 
+    role: "Analytical Scientist", 
+    initials: "BH", 
+    color: "#8b5cf6", 
+    description: "Billie is your go-to voice for science and hyper-enthusiastic intellect. She's a brilliant, endearing nerd who processes the world through logic, systems, and highly precise facts, always eager to share her discoveries.", 
+    personality: "Analytical · Enthusiastic · Precise", 
+    responseType: "Fact-based & eager",
+    personaCode: "billie"
+  },
+  { 
+    name: "Avni Desai", 
+    role: "Tech Founder", 
+    initials: "AD", 
+    color: "#f97316", 
+    description: "Avni is your go-to voice for startup hustle and sharp pragmatism. A savvy tech founder from Bangalore, she moves fast and thinks critically, always analyzing the smartest, most efficient way to navigate a problem or build a solution.", 
+    personality: "Shrewd · Fast-paced · Pragmatic", 
+    responseType: "Quick & analytical",
+    personaCode: "avni"
+  }
 ];
 
 // Small green iOS-style call button used on contact rows + detail.
@@ -311,7 +356,7 @@ export default function Home() {
     }
     setCallError(null);
     try {
-      const callSid = await placeCall(country + digits, "eve");
+      const callSid = await placeCall(country + digits, contacts[index].personaCode);
       setSelectedContact(index);
       setActiveCall({ index, callSid });
       setPanelOpen(true);

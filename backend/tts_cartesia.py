@@ -34,8 +34,20 @@ FIRST_CHUNK_TIMEOUT = config.CARTESIA_FIRST_CHUNK_TIMEOUT
 # Cartesia voice library). Add a row here when a new persona is added. These ids
 # are Cartesia-specific — the Kokoro fallback keeps its OWN map (different
 # namespace), so a persona can sound similar on both engines.
+CARTESIA_VOICE_MAP = {
+    "Ella": "2a12b36c-7f9b-4c3a-9f7a-72731b15323a",
+    "Krishna": "c63361f8-d142-4c62-8da7-8f8149d973d6",
+    "Benedict": "3c0f09d6-e0d7-499c-a594-70c5b7b93048",
+    "Ronald": "5ee9feff-1265-424a-9d7f-8e4d431a12c7",
+    "Kiara": "f8f5f1b2-f02d-4d8e-a40d-fd850a487b3d",
+}
+
 VOICES = {
-    "eve": "62ae83ad-4f6a-430b-af41-a9bede9286ca",
+    "eve": CARTESIA_VOICE_MAP["Ella"],
+    "siddhartha": CARTESIA_VOICE_MAP["Krishna"],
+    "jeremiah": CARTESIA_VOICE_MAP["Benedict"],
+    "billie": CARTESIA_VOICE_MAP["Ronald"],
+    "avni": CARTESIA_VOICE_MAP["Kiara"],
 }
 # Used when a persona has no voice mapped yet, so a new persona never crashes
 # the call path before its voice is chosen.
