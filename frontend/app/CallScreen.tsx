@@ -47,6 +47,35 @@ export function Transcript({ messages }: { messages: Msg[] }) {
         // Gentle fade upward, but keep old lines (the greeting) clearly legible.
         const opacity = Math.max(0.35, 1 - fromBottom * 0.1);
 
+        // Interrupted — a thin "you cut in" divider, no phone icon. Set apart
+        // from the call lifecycle notes (connected/ended/declined).
+        if (m.role === "system" && m.kind === "interrupted") {
+          return (
+            <div
+              key={i}
+              style={{
+                alignSelf: "stretch",
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                margin: "8px 0",
+                opacity: Math.max(0.3, opacity - 0.15),
+                transition: "opacity 0.4s ease",
+                color: "#9a94a2",
+                fontFamily: "var(--font-dm-sans)",
+                fontSize: "10.5px",
+                fontWeight: 500,
+                letterSpacing: "0.12em",
+                textTransform: "uppercase",
+              }}
+            >
+              <span style={{ flex: 1, height: "1px", background: "currentColor", opacity: 0.4 }} />
+              interrupted
+              <span style={{ flex: 1, height: "1px", background: "currentColor", opacity: 0.4 }} />
+            </div>
+          );
+        }
+
         // System notes (connected / ended / declined) — centered, muted, w/ icon.
         if (m.role === "system") {
           const down = m.kind === "declined" || m.kind === "ended"; // phone-down icon

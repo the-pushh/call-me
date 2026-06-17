@@ -27,8 +27,9 @@ import json
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from orchestrator import CallSession, STOP
+from orchestrator import CallSession, STOP, CLEAR
 import transcript_socket
+import sessions
 
 ws_router = APIRouter()
 
@@ -40,6 +41,13 @@ async def _sender(websocket: WebSocket, session: CallSession):
         payload = await loop.run_in_executor(None, session.outbound_q.get)
         if payload is STOP:
             break
+        if payload is CLEAR:
+            # Barge-in: tell Twilio to discard any audio it has buffered for
+            # playback, so the bot goes silent the instant the caller cuts in.
+            await websocket.send_text(json.dumps(
+                {"event": "clear", "streamSid": session.stream_sid}
+            ))
+            continue
         msg = {
             "event": "media",
             "streamSid": session.stream_sid,
@@ -78,6 +86,9 @@ async def media_ws(websocket: WebSocket):
                 session = CallSession(persona, call_sid=call_sid, emit=emit)
                 session.stream_sid = start["streamSid"]
                 session.start()
+                # Register so /hangup can stop this session directly, without
+                # waiting on Twilio's `completed` webhook to round-trip back.
+                sessions.register(call_sid, session)
                 sender_task = asyncio.create_task(_sender(websocket, session))
 
             elif event == "media" and session is not None:
@@ -94,6 +105,7 @@ async def media_ws(websocket: WebSocket):
     finally:
         # One teardown path for stop / disconnect / error.
         if session is not None:
+            sessions.unregister(session.call_sid)
             session.stop()
             session.outbound_q.put(STOP)   # release the sender
         if sender_task is not None:

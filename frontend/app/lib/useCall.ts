@@ -7,7 +7,7 @@ import { watchUrl } from "./backend";
 export type Msg = {
   role: "user" | "assistant" | "system";
   text: string;
-  kind?: "connected" | "declined" | "ended"; // system lines carry an icon hint
+  kind?: "connected" | "declined" | "ended" | "interrupted"; // system lines carry an icon hint
 };
 
 export type EndReason = "limit" | "remote"; // 2-min cap vs caller hung up
@@ -83,6 +83,9 @@ export function useCall(callSid: string | null): CallEvents {
         setMessages((m) => [...m, { role: "user", text: ev.text }]);
       } else if (ev.event === "assistant_sentence") {
         setMessages((m) => [...m, { role: "assistant", text: ev.text }]);
+      } else if (ev.event === "interrupted") {
+        // Caller cut in mid-reply — mark the bot's half-spoken line as cut off.
+        setMessages((m) => [...m, { role: "system", text: "interrupted", kind: "interrupted" }]);
       } else if (ev.event === "level") {
         // Live caller loudness -> waveform amplitude.
         setLevel(ev.value);

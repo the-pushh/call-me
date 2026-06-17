@@ -16,9 +16,11 @@ state machine:
   THINKING  : transcribe that utterance; if there are real words, ask the Brain.
   SPEAKING  : stream the Brain's sentences through TTS to the phone.
 
-Step 2 has NO barge-in (that's Step 5): while SPEAKING we ignore the mic, then
-discard whatever piled up before listening again. The per-turn `turn_stop`
-Event is wired through now so Step 5 can flip it mid-turn without re-plumbing.
+Barge-in (Step 5): while SPEAKING, a side thread (`_monitor_barge`) watches the
+caller's mic; if they cut in, it flips the per-turn `turn_stop` Event, drops the
+unsent audio, and tells Twilio to flush its buffer, then the loop jumps straight
+back to LISTENING. If the bot finishes uninterrupted, we discard whatever piled
+up on the mic before listening again.
 """
 
 import queue
@@ -40,6 +42,20 @@ import audio_cache
 # Pushed onto a queue to mean "shut down". Shared with media_socket's sender so
 # both the inbound (worker) and outbound (sender) sides unwind on teardown.
 STOP = object()
+
+# Pushed onto outbound_q to mean "tell Twilio to flush its playback buffer NOW"
+# (barge-in). The sender turns it into Twilio's {"event":"clear"} message. We
+# clear the queue first, but Twilio has already buffered some audio downstream;
+# only the `clear` message stops THAT from playing over the caller cutting in.
+CLEAR = object()
+
+# How far ahead of real-time playback the worker is allowed to feed audio. A
+# small lead absorbs synthesis/network jitter so the bot doesn't stutter; small
+# enough that Twilio's playback buffer stays shallow, so a barge-in `clear` cuts
+# the bot off fast. mu-law @ 8 kHz = 1 byte per sample, so a chunk's duration in
+# seconds is just len(chunk) / 8000.
+PREBUFFER_S = 0.3
+PLAY_RATE = 8000
 
 
 def _default_emit(event, **data):
@@ -74,9 +90,33 @@ class CallSession:
 
         self.acc = FrameAccumulator()
 
+        # Barge-in (Step 5) reads the SAME inbound stream while the bot speaks,
+        # but never at the same time as _capture (capture runs in LISTENING, the
+        # monitor only in SPEAKING), so it gets its own resampler + accumulator
+        # to keep each path's filter/frame state independent and click-free.
+        self.barge_rs = Resampler(8000, 16000)
+        self.barge_acc = FrameAccumulator()
+
         # VAD is loaded lazily on the worker thread (see _run) — load_silero_vad
-        # is heavy and must never run on the asyncio event loop.
+        # is heavy and must never run on the asyncio event loop. Two gates:
+        # capture_vad does endpointing (utterance end); barge_vad only watches
+        # for the START of caller speech while the bot is talking.
         self.capture_vad = None
+        self.barge_vad = None
+
+        # Set by the barge monitor when the caller cuts in mid-reply, so the loop
+        # knows to jump straight back to LISTENING without draining their speech.
+        self._barge_fired = False
+
+        # Outbound pacing clock. TTS synthesises far faster than real time; left
+        # unpaced, the worker dumps the WHOLE reply onto outbound_q in ~1s and
+        # Twilio buffers it all — so _respond (and the barge monitor that lives
+        # only as long as it) finish long before the caller actually hears the
+        # reply, and a barge-in mid-playback can't fire. We hold the feed to real
+        # time (keeping just PREBUFFER_S ahead) so SPEAKING lasts as long as the
+        # audio actually plays, and Twilio's buffer stays shallow enough that a
+        # `clear` cuts the bot off near-instantly.
+        self._play_deadline = 0.0
 
         self.state = "connected"
         self.stream_sid = None        # set by media_socket on the `start` event
@@ -108,6 +148,11 @@ class CallSession:
         def _load_vad():
             from vad import VADGate
             self.capture_vad = VADGate(silence_ms=SILENCE_TIMEOUT_MS)
+            # Barge gate: a touch stricter (higher threshold, needs a few speech
+            # frames) so the bot's own audio echoing back through the caller's
+            # line can't false-trigger an interrupt. silence_ms is irrelevant —
+            # the monitor only ever reads its "start" signal.
+            self.barge_vad = VADGate(threshold=0.6, speech_start_frames=3)
             vad_ready.set()
 
         threading.Thread(target=_load_vad, daemon=True).start()
@@ -171,10 +216,23 @@ class CallSession:
             self._queue_filler()
 
             self._set_state("speaking")
+            # Barge-in: while the bot speaks, a side thread watches the caller's
+            # mic. If they cut in, it fires the interrupt and sets _barge_fired.
+            self._barge_fired = False
+            barge_thread = threading.Thread(target=self._monitor_barge, daemon=True)
+            barge_thread.start()
             self._respond(text, t_turn, stt_ms)
+            # Reply finished (or was cut short) — release the monitor either way
+            # and wait for it to unwind before touching shared audio state.
+            self.turn_stop.set()
+            barge_thread.join(timeout=1.0)
 
-            # No barge-in in Step 2: drop the audio that arrived while we talked
-            # so the next turn starts from a clean mic, not a stale backlog.
+            if self._barge_fired:
+                # Caller is mid-sentence — do NOT drain. Drop straight back to
+                # LISTENING so _capture catches the rest of what they're saying.
+                continue
+            # Bot finished uninterrupted: drop the audio that piled up while it
+            # talked so the next turn starts from a clean mic, not a stale backlog.
             self._drain_inbound()
 
         # Loop exited — teardown (hang-up, timeout, or disconnect). Tell the
@@ -207,8 +265,9 @@ class CallSession:
                     self.emit("level", value=min(1.0, rms * 6.0))
 
                 result = self.capture_vad.process(frame)
-                # ndarray = utterance done. "start" is barge-in (Step 5) — here
-                # the caller is just beginning their turn, nothing to do yet.
+                # ndarray = utterance done. "start" here just means the caller
+                # is beginning their turn normally (barge-in — cutting in while
+                # the bot talks — is handled by _monitor_barge, not here).
                 if isinstance(result, np.ndarray):
                     return result
         return None
@@ -264,8 +323,57 @@ class CallSession:
                 self._speak(sentence)
 
             first = False
-            if self.stop_event.is_set():
+            # stop_event = session teardown; turn_stop = barge-in cut this reply
+            # short. Either way, stop pulling more sentences for this turn.
+            if self.stop_event.is_set() or self.turn_stop.is_set():
                 break
+
+    def _monitor_barge(self):
+        """Run on a side thread WHILE the bot speaks. Drains the caller's mic and
+        watches barge_vad for the START of speech; the moment they cut in, fire
+        the interrupt and stop. Exits on its own when turn_stop/stop_event is set
+        (the reply finished without an interruption)."""
+        self.barge_vad.reset()
+        self.barge_acc = FrameAccumulator()
+        while not self.turn_stop.is_set() and not self.stop_event.is_set():
+            try:
+                raw = self.inbound_q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if raw is STOP:
+                self.inbound_q.put(STOP)   # put back for capture/teardown
+                return
+
+            pcm16 = self.barge_rs.process(mulaw_to_pcm16(raw))
+            f32 = int16_to_float(np.frombuffer(pcm16, dtype=np.int16))
+            for frame in self.barge_acc.feed(f32):
+                # In IDLE the gate only ever returns None or "start" (never an
+                # utterance array), so the string compare is safe here.
+                if self.barge_vad.process(frame) == "start":
+                    self._barge_in()
+                    return
+
+    def _barge_in(self):
+        """The caller cut in. Three steps, in order, to make the bot go quiet
+        FAST: (1) stop generating/synthesising this turn, (2) drop the audio we
+        haven't sent yet, (3) tell Twilio to flush what it has already buffered
+        downstream — without (3) the caller would keep hearing the bot for a
+        second over their own voice."""
+        print("[barge] caller cut in — interrupting reply")
+        self._barge_fired = True
+        self.turn_stop.set()           # 1. halt Brain + TTS for this turn
+        self._clear_outbound()         # 2. drop queued-but-unsent audio
+        self.outbound_q.put(CLEAR)     # 3. flush Twilio's playback buffer
+        # Mark the cut on the transcript so the bot's half-spoken reply reads as
+        # interrupted, not just abandoned mid-sentence.
+        self.emit("interrupted")
+
+    def _clear_outbound(self):
+        try:
+            while True:
+                self.outbound_q.get_nowait()
+        except queue.Empty:
+            pass
 
     def _speak(self, text: str, on_first_audio=None):
         """Synthesise one piece of text and push it to the phone.
@@ -277,12 +385,34 @@ class CallSession:
         queued — used to time how fast sound starts coming out.
         """
         for mulaw in tts.synthesize(text, stop_event=self.turn_stop, persona=self.persona):
-            if self.stop_event.is_set():
+            # turn_stop = barge-in; stop queueing immediately so we don't push
+            # audio AFTER the CLEAR the monitor just sent (it would play over the
+            # caller). stop_event = session teardown.
+            if self.stop_event.is_set() or self.turn_stop.is_set():
                 break
             self.outbound_q.put(mulaw)
             if on_first_audio is not None:
                 on_first_audio()
                 on_first_audio = None
+            # Hold to real time so SPEAKING lasts as long as the audio plays —
+            # this is what keeps the barge monitor alive across the whole reply.
+            self._pace(len(mulaw) / PLAY_RATE)
+
+    def _pace(self, duration: float):
+        """Block until the audio already queued is within PREBUFFER_S of being
+        fully played, advancing the play clock by `duration`. Sleeps in short
+        slices so a barge-in (turn_stop) or teardown breaks out within ~20 ms."""
+        now = time.monotonic()
+        if self._play_deadline < now:
+            # We fell behind (or this is the first chunk of a fresh utterance) —
+            # restart the clock from now so we don't sleep off stale lead.
+            self._play_deadline = now
+        self._play_deadline += duration
+        while not self.turn_stop.is_set() and not self.stop_event.is_set():
+            ahead = self._play_deadline - time.monotonic()
+            if ahead <= PREBUFFER_S:
+                break
+            time.sleep(min(0.02, ahead - PREBUFFER_S))
 
     def _queue_filler(self):
         """Queue one pre-made filler clip, if any are built yet."""

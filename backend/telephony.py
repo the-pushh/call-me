@@ -15,6 +15,7 @@ from twilio.rest import Client
 from twilio.twiml.voice_response import VoiceResponse, Connect
 
 import transcript_socket
+import sessions
 from config import (
     TWILLIO_SID,
     TWILLIO_AUTH_TOKEN,
@@ -69,6 +70,11 @@ async def hangup_call(call_sid: str) -> None:
 
 @router.post("/hangup/{call_sid}")
 async def hangup_endpoint(call_sid: str):
+    # Stop the local session immediately (instant teardown), THEN drop the Twilio
+    # leg. The `completed` webhook still fires afterwards; stop() is idempotent.
+    session = sessions.get(call_sid)
+    if session is not None:
+        session.stop()
     await hangup_call(call_sid)
     return Response(status_code=204)
 
