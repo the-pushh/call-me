@@ -64,6 +64,12 @@ class Brain:
     def reset(self):
         self.messages = [{"role": "system", "content": self.system_prompt}]
 
+    def add_assistant_message(self, text):
+        """Record something the bot said WITHOUT generating it (e.g. the spoken
+        greeting), so it becomes part of the history the model sees next turn."""
+        if text and text.strip():
+            self.messages.append({"role": "assistant", "content": text.strip()})
+
     def _trim_history(self):
         """helps in cost and latency"""
         max_msgs = 1 + self.max_turns * 2
