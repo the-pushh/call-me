@@ -23,6 +23,7 @@ import asyncio
 import json
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 
 router = APIRouter()
 
@@ -108,13 +109,26 @@ async def watch(websocket: WebSocket, call_sid: str):
     reader = asyncio.create_task(_watch_for_close())
     try:
         while not reader.done():
+            # Stop the instant the socket leaves CONNECTED. Without this there's
+            # a race: the browser closes (or Twilio teardown closes us) between
+            # the reader noticing and the next send, and send_text on an
+            # already-closed socket raises a RuntimeError ("Unexpected ASGI
+            # message ... after sending 'websocket.close'") that isn't a
+            # WebSocketDisconnect, so it escaped as a 500.
+            if websocket.client_state != WebSocketState.CONNECTED:
+                break
             # Wake up periodically even with no events so a browser-side close
             # (reader.done()) is noticed promptly instead of blocking forever.
             try:
                 msg = await asyncio.wait_for(q.get(), timeout=1.0)
             except asyncio.TimeoutError:
                 continue
-            await websocket.send_text(msg)
+            try:
+                await websocket.send_text(msg)
+            except (WebSocketDisconnect, RuntimeError):
+                # Closed underneath us between the state check and the send —
+                # nothing left to do but clean up.
+                break
     except WebSocketDisconnect:
         pass
     finally:

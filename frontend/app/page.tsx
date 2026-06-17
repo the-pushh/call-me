@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  AsYouType,
+  getCountries,
+  getCountryCallingCode,
+  parsePhoneNumber,
+  type CountryCode,
+} from "libphonenumber-js";
 
 import { PhoneCall, Transcript } from "./CallScreen";
 import { placeCall, hangupCall, submitFeedback } from "./lib/backend";
@@ -11,15 +18,38 @@ const ACCENT = "#30D158";
 
 type EndReason = "user" | "limit";
 
-const COUNTRY_CODES = [
-  { code: "+1", flag: "🇺🇸" },
-  { code: "+44", flag: "🇬🇧" },
-  { code: "+91", flag: "🇮🇳" },
-  { code: "+61", flag: "🇦🇺" },
-  { code: "+49", flag: "🇩🇪" },
-  { code: "+33", flag: "🇫🇷" },
-  { code: "+81", flag: "🇯🇵" },
-];
+// ISO alpha-2 -> the 🇺🇸-style flag emoji (each letter maps to a regional
+// indicator symbol). Avoids shipping 250 flag images.
+function flagOf(iso: string): string {
+  return String.fromCodePoint(...[...iso.toUpperCase()].map((c) => 0x1f1e6 + c.charCodeAt(0) - 65));
+}
+
+// Every country libphonenumber knows, with its dial code + English name. Built
+// once. `regionNames` turns "US" -> "United States" for the searchable list.
+type Country = { iso: CountryCode; name: string; dial: string; flag: string };
+
+function buildCountries(): Country[] {
+  const regionNames = new Intl.DisplayNames(["en"], { type: "region" });
+  return getCountries()
+    .map((iso) => ({
+      iso,
+      name: regionNames.of(iso) ?? iso,
+      dial: `+${getCountryCallingCode(iso)}`,
+      flag: flagOf(iso),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// E.164 ("+14155552671") if `raw` is a valid number for `iso`, else null. One
+// gate for both "is the call allowed" and "what to dial".
+function toE164(raw: string, iso: CountryCode): string | null {
+  try {
+    const p = parsePhoneNumber(raw, iso);
+    return p && p.isValid() ? p.number : null;
+  } catch {
+    return null;
+  }
+}
 
 const contacts = [
   { 
@@ -74,12 +104,15 @@ const contacts = [
   }
 ];
 
-// Small green iOS-style call button used on contact rows + detail.
-function CallButton({ onClick, size = 34 }: { onClick: (e: React.MouseEvent) => void; size?: number }) {
+// Small green iOS-style call button used on contact rows + detail. Greys out and
+// stops responding while the entered number isn't a valid one to dial.
+function CallButton({ onClick, size = 34, disabled = false }: { onClick: (e: React.MouseEvent) => void; size?: number; disabled?: boolean }) {
   return (
     <button
       onClick={onClick}
-      style={{ width: `${size}px`, height: `${size}px`, borderRadius: "50%", background: "#34c759", border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, boxShadow: "0 2px 8px rgba(52,199,89,0.4)" }}
+      disabled={disabled}
+      title={disabled ? "enter a valid phone number first" : "call"}
+      style={{ width: `${size}px`, height: `${size}px`, borderRadius: "50%", background: disabled ? "#c7c7cc" : "#34c759", border: "none", cursor: disabled ? "not-allowed" : "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, boxShadow: disabled ? "none" : "0 2px 8px rgba(52,199,89,0.4)", transition: "background 0.2s ease" }}
     >
       <svg width={size * 0.5} height={size * 0.5} viewBox="0 0 24 24" fill="white">
         <path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z" />
@@ -88,7 +121,92 @@ function CallButton({ onClick, size = 34 }: { onClick: (e: React.MouseEvent) => 
   );
 }
 
-function ContactDetail({ contact, onBack, onCall }: { contact: (typeof contacts)[0]; onBack: () => void; onCall: () => void }) {
+// Searchable country selector — replaces the fixed 7-code <select>. Click to
+// open a popover with a search box over EVERY country (name or dial code), the
+// way a shadcn combobox works, just built inline to match the app's styling.
+function CountryCombobox({ countries, value, onChange }: { countries: Country[]; value: CountryCode; onChange: (iso: CountryCode) => void }) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const current = countries.find((c) => c.iso === value);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    inputRef.current?.focus();
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  const needle = q.trim().toLowerCase();
+  const list = needle
+    ? countries.filter((c) => c.name.toLowerCase().includes(needle) || c.dial.includes(needle) || c.iso.toLowerCase() === needle)
+    : countries;
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        style={{ display: "flex", alignItems: "center", gap: "5px", border: "none", background: "transparent", outline: "none", fontSize: "18px", color: "#1c1c1e", cursor: "pointer", fontWeight: 600, padding: "0 2px" }}
+      >
+        <span style={{ fontSize: "19px", lineHeight: 1 }}>{current?.flag ?? "🏳️"}</span>
+        <span>{current?.dial ?? "+?"}</span>
+        <svg width="10" height="6" viewBox="0 0 12 8" fill="none" stroke="#6b6580" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform 0.2s ease" }}><path d="M1 1.5L6 6.5L11 1.5" /></svg>
+      </button>
+
+      {open && (
+        <div
+          style={{
+            position: "absolute", top: "calc(100% + 12px)", left: "-12px", zIndex: 90,
+            width: "300px", maxWidth: "80vw",
+            background: "rgba(255,255,255,0.98)", backdropFilter: "blur(12px)",
+            border: "1px solid rgba(80,60,140,0.18)", borderRadius: "14px",
+            boxShadow: "0 16px 44px rgba(60,40,110,0.22)", overflow: "hidden",
+          }}
+        >
+          <div style={{ padding: "10px", borderBottom: "1px solid #efeaf8" }}>
+            <input
+              ref={inputRef}
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Search country or code"
+              style={{ width: "100%", border: "1px solid #e2dcf0", borderRadius: "9px", padding: "8px 10px", fontSize: "14px", outline: "none", color: "#15151c", background: "#faf8ff" }}
+            />
+          </div>
+          <div style={{ maxHeight: "260px", overflowY: "auto" }}>
+            {list.map((c) => (
+              <button
+                key={c.iso}
+                onClick={() => { onChange(c.iso); setOpen(false); setQ(""); }}
+                style={{
+                  width: "100%", display: "flex", alignItems: "center", gap: "10px",
+                  padding: "9px 14px", border: "none", cursor: "pointer", textAlign: "left",
+                  background: c.iso === value ? "#f1ecfb" : "transparent",
+                  fontSize: "14px", color: "#1c1c1e",
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = "#f6f2fe")}
+                onMouseLeave={(e) => (e.currentTarget.style.background = c.iso === value ? "#f1ecfb" : "transparent")}
+              >
+                <span style={{ fontSize: "18px", lineHeight: 1 }}>{c.flag}</span>
+                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.name}</span>
+                <span style={{ color: "#8e8e93", fontVariantNumeric: "tabular-nums" }}>{c.dial}</span>
+              </button>
+            ))}
+            {list.length === 0 && (
+              <div style={{ padding: "16px 14px", fontSize: "13px", color: "#8e8e93", textAlign: "center" }}>No match</div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ContactDetail({ contact, onBack, onCall, canCall }: { contact: (typeof contacts)[0]; onBack: () => void; onCall: () => void; canCall: boolean }) {
   return (
     <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
       <div style={{ display: "flex", alignItems: "center", padding: "10px 16px 6px", borderBottom: "0.5px solid #e5e5ea" }}>
@@ -105,11 +223,15 @@ function ContactDetail({ contact, onBack, onCall }: { contact: (typeof contacts)
       </div>
 
       <div style={{ display: "flex", justifyContent: "center", marginBottom: "20px" }}>
-        <div onClick={onCall} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "5px", cursor: "pointer" }}>
-          <div style={{ width: "50px", height: "50px", borderRadius: "50%", background: "#34c759", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 4px 14px rgba(52,199,89,0.45)" }}>
+        <div
+          onClick={() => canCall && onCall()}
+          title={canCall ? "call" : "enter a valid phone number first"}
+          style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "5px", cursor: canCall ? "pointer" : "not-allowed", opacity: canCall ? 1 : 0.55 }}
+        >
+          <div style={{ width: "50px", height: "50px", borderRadius: "50%", background: canCall ? "#34c759" : "#c7c7cc", display: "flex", alignItems: "center", justifyContent: "center", boxShadow: canCall ? "0 4px 14px rgba(52,199,89,0.45)" : "none", transition: "background 0.2s ease" }}>
             <svg width="22" height="22" viewBox="0 0 24 24" fill="white"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z" /></svg>
           </div>
-          <span style={{ fontSize: "11px", color: "#34c759", fontWeight: "500" }}>call</span>
+          <span style={{ fontSize: "11px", color: canCall ? "#34c759" : "#8e8e93", fontWeight: "500" }}>{canCall ? "call" : "add number"}</span>
         </div>
       </div>
 
@@ -281,7 +403,8 @@ function FeedbackToast({ reason, onClose }: { reason: EndReason; onClose: () => 
 }
 
 export default function Home() {
-  const [country, setCountry] = useState("+1");
+  const countries = useMemo(buildCountries, []);
+  const [country, setCountry] = useState<CountryCode>("US");
   const [number, setNumber] = useState("");
   const [editMode, setEditMode] = useState(false);
   const [query, setQuery] = useState("");
@@ -302,15 +425,35 @@ export default function Home() {
     return () => clearInterval(id);
   }, []);
 
-  // Detect the caller's country from their IP and preset the dial code.
+  // Detect the caller's country from their IP and preset the selector. ipapi
+  // returns an ISO alpha-2 in `country_code`; only accept it if it's one we know.
   useEffect(() => {
     fetch("https://ipapi.co/json/")
       .then((r) => r.json())
       .then((d) => {
-        if (d && d.country_calling_code) setCountry(d.country_calling_code);
+        const iso = d?.country_code as CountryCode | undefined;
+        if (iso && countries.some((c) => c.iso === iso)) setCountry(iso);
       })
       .catch(() => {});
-  }, []);
+  }, [countries]);
+
+  // Valid number for the chosen country -> the E.164 string we dial; null while
+  // it's incomplete/invalid. Drives both the call buttons' disabled state and
+  // what gets sent to the backend, so the two can never disagree.
+  const e164 = useMemo(() => toE164(number, country), [number, country]);
+  const valid = e164 !== null;
+
+  // Format as the user types; on delete, leave their edit alone so a backspace
+  // can't get "stuck" fighting the formatter.
+  const onNumberChange = (input: string) => {
+    if (input.length < number.length) setNumber(input);
+    else setNumber(new AsYouType(country).input(input));
+  };
+  const onCountryChange = (iso: CountryCode) => {
+    setCountry(iso);
+    setCallError(null);
+    setNumber((n) => new AsYouType(iso).input(n.replace(/[^\d]/g, "")));
+  };
 
   // End sequence: swing the hang-up icon (closing), THEN collapse the transcript
   // and slide the phone back to centre (panelOpen=false animates), THEN drop the
@@ -349,14 +492,13 @@ export default function Home() {
   }, [declined, activeCall, closing, beginEnd]);
 
   const handleCall = async (index: number) => {
-    const digits = number.replace(/[^\d]/g, "");
-    if (!digits) {
-      setCallError("enter your number first");
+    if (!e164) {
+      setCallError("enter a valid phone number first");
       return;
     }
     setCallError(null);
     try {
-      const callSid = await placeCall(country + digits, contacts[index].personaCode);
+      const callSid = await placeCall(e164, contacts[index].personaCode);
       setSelectedContact(index);
       setActiveCall({ index, callSid });
       setPanelOpen(true);
@@ -372,8 +514,8 @@ export default function Home() {
 
   const inCall = activeCall !== null;
   const clock = now ? now.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "9:41";
-  // Make sure the detected dial code is selectable even if not in the curated list.
-  const codeList = COUNTRY_CODES.some((c) => c.code === country) ? COUNTRY_CODES : [{ code: country, flag: "📞" }, ...COUNTRY_CODES];
+  // Show the "doesn't look right" hint only once they've typed something real.
+  const showInvalid = number.trim().length > 2 && !valid;
 
   return (
     <div
@@ -415,23 +557,19 @@ export default function Home() {
           style={{
             display: "flex", alignItems: "center", gap: "6px",
             background: "rgba(255,255,255,0.75)", borderRadius: "9999px",
-            border: "1px solid rgba(80,60,140,0.18)", padding: "8px 10px 8px 16px",
+            border: `1px solid ${showInvalid ? "rgba(224,36,94,0.5)" : "rgba(80,60,140,0.18)"}`,
+            padding: "8px 10px 8px 16px",
             boxShadow: "0 8px 30px rgba(80,60,140,0.12)",
+            transition: "border-color 0.2s ease",
           }}
         >
-          <select
-            value={country}
-            onChange={(e) => setCountry(e.target.value)}
-            style={{ border: "none", background: "transparent", outline: "none", fontSize: "18px", color: "#1c1c1e", cursor: "pointer", fontWeight: 600 }}
-          >
-            {codeList.map((c) => (
-              <option key={c.code} value={c.code}>{`${c.flag} ${c.code}`}</option>
-            ))}
-          </select>
+          <CountryCombobox countries={countries} value={country} onChange={onCountryChange} />
+          <div style={{ width: "1px", height: "22px", background: "rgba(80,60,140,0.16)" }} />
           <input
             type="tel"
             value={number}
-            onChange={(e) => setNumber(e.target.value)}
+            onChange={(e) => onNumberChange(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && valid && selectedContact !== null) handleCall(selectedContact); }}
             placeholder="your number"
             style={{
               border: "none", outline: "none", background: "transparent",
@@ -439,9 +577,16 @@ export default function Home() {
               padding: "4px 6px", width: "190px", fontWeight: 500,
             }}
           />
+          {valid && (
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={ACCENT} strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" style={{ marginRight: "4px" }}><path d="M20 6L9 17l-5-5" /></svg>
+          )}
         </div>
       </div>
-      {callError && <p style={{ color: "#e0245e", fontSize: "13px", marginTop: "-30px", marginBottom: "20px", fontWeight: 500 }}>{callError}</p>}
+      {callError ? (
+        <p style={{ color: "#e0245e", fontSize: "13px", marginTop: "-30px", marginBottom: "20px", fontWeight: 500 }}>{callError}</p>
+      ) : showInvalid ? (
+        <p style={{ color: "#e0245e", fontSize: "13px", marginTop: "-30px", marginBottom: "20px", fontWeight: 500 }}>that doesn&apos;t look like a valid number for this country</p>
+      ) : null}
 
       {/* Stage: transcript (left, animates in) + plenty of gap + phone (right). */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -456,11 +601,17 @@ export default function Home() {
             justifyContent: "flex-end",
           }}
         >
-          {activeCall && <Transcript messages={messages} />}
+          {activeCall && <Transcript messages={messages} ending={closing} />}
         </div>
 
-        {/* iPhone */}
-        <div className="relative" style={{ width: "300px" }}>
+        {/* iPhone — jolts with a hang-up bounce as the call tears down. */}
+        <div
+          className="relative"
+          style={{
+            width: "300px",
+            animation: closing ? "hangup-bounce 0.62s cubic-bezier(0.28,0.7,0.4,1)" : "none",
+          }}
+        >
           <div style={{ position: "absolute", left: "-4px", top: "88px", width: "4px", height: "24px", background: "linear-gradient(90deg, #3a3a3c, #636366)", borderRadius: "2px 0 0 2px", boxShadow: "-2px 0 5px rgba(0,0,0,0.55)" }} />
           <div style={{ position: "absolute", left: "-4px", top: "128px", width: "4px", height: "42px", background: "linear-gradient(90deg, #3a3a3c, #636366)", borderRadius: "2px 0 0 2px", boxShadow: "-2px 0 5px rgba(0,0,0,0.55)" }} />
           <div style={{ position: "absolute", left: "-4px", top: "178px", width: "4px", height: "42px", background: "linear-gradient(90deg, #3a3a3c, #636366)", borderRadius: "2px 0 0 2px", boxShadow: "-2px 0 5px rgba(0,0,0,0.55)" }} />
@@ -499,7 +650,7 @@ export default function Home() {
               {inCall ? (
                 <PhoneCall contact={contacts[activeCall.index]} state={state} level={level} ended={ended || closing} onHangup={() => { hangupCall(activeCall.callSid); beginEnd("user"); }} />
               ) : selectedContact !== null ? (
-                <ContactDetail contact={contacts[selectedContact]} onBack={() => setSelectedContact(null)} onCall={() => handleCall(selectedContact)} />
+                <ContactDetail contact={contacts[selectedContact]} onBack={() => setSelectedContact(null)} onCall={() => handleCall(selectedContact)} canCall={valid} />
               ) : (
                 <div style={{ flex: 1, overflowY: "auto", overflowX: "hidden" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", padding: "14px 16px 6px" }}>
@@ -527,7 +678,7 @@ export default function Home() {
                       {editMode ? (
                         <svg width="8" height="14" viewBox="0 0 8 14" fill="none" stroke="#c7c7cc" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M1 1l6 6-6 6" /></svg>
                       ) : (
-                        <CallButton onClick={(e) => { e.stopPropagation(); handleCall(i); }} />
+                        <CallButton onClick={(e) => { e.stopPropagation(); handleCall(i); }} disabled={!valid} />
                       )}
                     </div>
                   ))}

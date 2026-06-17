@@ -1,9 +1,48 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 
 import type { Msg } from "./lib/useCall";
+
+// ── Pixel dissolve ─────────────────────────────────────────────────────────
+// An SVG turbulence + displacement filter that shatters whatever it's applied
+// to into a grain of scattered pixels. While `active`, we ramp the displacement
+// `scale` from 0 up over ~0.8s with requestAnimationFrame, so the transcript
+// looks like it disintegrates into pixels as the call ends. id is shared by the
+// element that references `url(#pixelate-dissolve)`.
+function PixelDissolveFilter({ active, delay = 0 }: { active: boolean; delay?: number }) {
+  const dispRef = useRef<SVGFEDisplacementMapElement>(null);
+  useEffect(() => {
+    const disp = dispRef.current;
+    if (!disp) return;
+    if (!active) {
+      disp.setAttribute("scale", "0");
+      return;
+    }
+    let raf = 0;
+    let start = 0;
+    const dur = 800;
+    const tick = (t: number) => {
+      if (!start) start = t;
+      const p = Math.min(1, Math.max(0, (t - start - delay) / dur));
+      // ease-in so it holds legible a beat, then tears apart fast.
+      disp.setAttribute("scale", String(p * p * 70));
+      if (p < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [active, delay]);
+
+  return (
+    <svg width="0" height="0" style={{ position: "absolute", pointerEvents: "none" }} aria-hidden>
+      <filter id="pixelate-dissolve" x="-20%" y="-20%" width="140%" height="140%">
+        <feTurbulence type="fractalNoise" baseFrequency="0.7" numOctaves="2" seed="11" result="noise" />
+        <feDisplacementMap ref={dispRef} in="SourceGraphic" in2="noise" scale="0" xChannelSelector="R" yChannelSelector="G" />
+      </filter>
+    </svg>
+  );
+}
 
 // ── Streaming text ────────────────────────────────────────────────────────
 // Reveals its text character-by-character on mount, so each new line types
@@ -28,9 +67,11 @@ function StreamingText({ text }: { text: string }) {
 // bottom: newest at the bottom, older gently fading upward. All lines are
 // left-aligned; the speaker is clear from the FONT — the user in DM Sans, the
 // bot in Instrument Serif, which types itself out.
-export function Transcript({ messages }: { messages: Msg[] }) {
+export function Transcript({ messages, ending = false }: { messages: Msg[]; ending?: boolean }) {
   const n = messages.length;
   return (
+    <>
+    <PixelDissolveFilter active={ending} delay={350} />
     <div
       style={{
         height: "600px",
@@ -40,6 +81,11 @@ export function Transcript({ messages }: { messages: Msg[] }) {
         overflow: "hidden",
         padding: "0 10px",
         width: "100%",
+        // On hang-up the whole transcript shatters into pixels and fades. The
+        // displacement is driven by PixelDissolveFilter; we just fade alongside.
+        filter: ending ? "url(#pixelate-dissolve)" : "none",
+        opacity: ending ? 0 : 1,
+        transition: "opacity 0.55s ease 0.45s",
       }}
     >
       {messages.map((m, i) => {
@@ -134,6 +180,7 @@ export function Transcript({ messages }: { messages: Msg[] }) {
         );
       })}
     </div>
+    </>
   );
 }
 
@@ -240,9 +287,9 @@ export function PhoneCall({
           viewBox="0 0 24 24"
           fill="white"
           style={{
-            // slant while live, swings to horizontal as the call ends
-            transform: ended ? "rotate(0deg)" : "rotate(135deg)",
-            transition: "transform 0.6s ease",
+            // Static iOS-style slant. The "call ended" motion lives in the phone
+            // bounce now, not a receiver swing (that tilt read as weird).
+            transform: "rotate(135deg)",
           }}
         >
           <path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z" />
