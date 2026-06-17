@@ -71,10 +71,15 @@ class Brain:
             self.messages.append({"role": "assistant", "content": text.strip()})
 
     def _trim_history(self):
-        """helps in cost and latency"""
+        """Keep the system prompt + the most recent max_turns exchanges.
+
+        helps in cost and latency. Note the list-building: [system_msg] is a
+        one-item list we ADD to the recent slice. Writing system_msg + slice
+        (without the brackets) would try to add a dict to a list and crash.
+        """
         max_msgs = 1 + self.max_turns * 2
         if len(self.messages) > max_msgs:
-            self.messages = [self.messages[0] + self.messages[-(self.max_turns * 2):]]
+            self.messages = [self.messages[0]] + self.messages[-(self.max_turns * 2):]
 
     def _force_cut(self, buffer):
         """if the model generates longer sentence without any punctations then we deliberately break it to stream and keep the voice flowing"""

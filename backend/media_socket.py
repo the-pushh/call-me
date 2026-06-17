@@ -64,9 +64,12 @@ async def media_ws(websocket: WebSocket):
                 # back) and the persona we relayed through the TwiML.
                 start = data["start"]
                 persona = start.get("customParameters", {}).get("persona", "eve")
-                print(f"[media] start sid={start['streamSid']} persona={persona}")
+                call_sid = start.get("callSid")
+                print(f"[media] start sid={start['streamSid']} call={call_sid} persona={persona}")
 
-                session = CallSession(persona)
+                # call_sid lets the session collect the greeting pre-warmed
+                # during the ring (see audio_cache / main's /call endpoint).
+                session = CallSession(persona, call_sid=call_sid)
                 session.stream_sid = start["streamSid"]
                 session.start()
                 sender_task = asyncio.create_task(_sender(websocket, session))

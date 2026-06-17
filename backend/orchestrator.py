@@ -25,14 +25,16 @@ import queue
 import threading
 import time
 
+from config import SILENCE_TIMEOUT_MS, MIN_UTTERANCE_MS
 import numpy as np
 
-from audio_formatting import int16_to_float, float_to_int16
+from audio_formatting import int16_to_float, float_to_int16, SAMPLE_RATE
 from twilio_audio import mulaw_to_pcm16, pcm16_to_mulaw, Resampler, FrameAccumulator
 from brains import Brain
 from stt import transcribe
 import tts
 from greetings import pick_greeting
+import audio_cache
 
 # Pushed onto a queue to mean "shut down". Shared with media_socket's sender so
 # both the inbound (worker) and outbound (sender) sides unwind on teardown.
@@ -48,8 +50,9 @@ def _default_emit(event, **data):
 class CallSession:
     """Owns one call: queues, audio state, the Brain, and the loop thread."""
 
-    def __init__(self, persona: str, emit=None):
+    def __init__(self, persona: str, call_sid: str | None = None, emit=None):
         self.persona = persona
+        self.call_sid = call_sid     # used to pick up the pre-warmed greeting
         self.emit = emit or _default_emit
 
         # Audio transport queues (filled/drained by media_socket).
@@ -95,22 +98,49 @@ class CallSession:
     # --- the loop ----------------------------------------------------------
 
     def _run(self):
-        # Heavy import path: build the VAD here, on the worker thread.
-        from vad import VADGate
-        self.capture_vad = VADGate(silence_ms=700)
+        # Load the VAD on a SIDE thread so it loads WHILE the greeting plays,
+        # instead of making the caller wait for it before hearing anything.
+        # load_silero_vad is heavy and must never touch the asyncio event loop.
+        vad_ready = threading.Event()
+
+        def _load_vad():
+            from vad import VADGate
+            self.capture_vad = VADGate(silence_ms=SILENCE_TIMEOUT_MS)
+            vad_ready.set()
+
+        threading.Thread(target=_load_vad, daemon=True).start()
 
         # Greeting: the bot speaks first, then REMEMBERS it said so, so its first
-        # real reply follows on from the opener instead of starting cold.
+        # real reply follows on from the opener. Prefer the version pre-warmed
+        # during the ring (instant); fall back to live synthesis if it wasn't
+        # ready in time.
         self._set_state("speaking")
-        greeting = pick_greeting(self.persona)
-        self._speak(greeting)
-        self.brain.add_assistant_message(greeting)
+        prewarmed = audio_cache.take_greeting(self.call_sid) if self.call_sid else None
+        if prewarmed is not None:
+            text, chunks = prewarmed
+            for chunk in chunks:
+                if self.stop_event.is_set():
+                    break
+                self.outbound_q.put(chunk)
+            self.brain.add_assistant_message(text)
+        else:
+            greeting = pick_greeting(self.persona)
+            self._speak(greeting)
+            self.brain.add_assistant_message(greeting)
+
+        # Must have the VAD before we can listen.
+        vad_ready.wait()
 
         while not self.stop_event.is_set():
             self._set_state("listening")
             utterance = self._capture()
             if utterance is None:
                 break   # teardown
+
+            # Ignore blips too short to be a real sentence — keeps eve from
+            # reacting to coughs/line noise (and they transcribe to junk anyway).
+            if len(utterance) < (MIN_UTTERANCE_MS / 1000) * SAMPLE_RATE:
+                continue
 
             self._set_state("thinking")
             # t_turn marks the instant the caller's turn ended (VAD released the
@@ -123,6 +153,13 @@ class CallSession:
                 print(f"[timing] stt={stt_ms:.0f}ms (no speech)")
                 continue   # silence/hallucination — keep listening
             self.emit("user_transcript", text=text)
+
+            # Drop a pre-made filler in eve's voice NOW, while the real reply is
+            # still being thought up and synthesised. The caller hears "umm..."
+            # within ~0ms instead of dead silence; the answer follows seamlessly
+            # because the queue plays filler-then-reply in order. Only after we
+            # know there are real words, so silence never triggers a stray umm.
+            self._queue_filler()
 
             self._set_state("speaking")
             self._respond(text, t_turn, stt_ms)
@@ -213,6 +250,14 @@ class CallSession:
             if on_first_audio is not None:
                 on_first_audio()
                 on_first_audio = None
+
+    def _queue_filler(self):
+        """Queue one pre-made filler clip, if any are built yet."""
+        chunks = audio_cache.get_filler()
+        if not chunks:
+            return
+        for chunk in chunks:
+            self.outbound_q.put(chunk)
 
     def _drain_inbound(self):
         try:

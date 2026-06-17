@@ -21,6 +21,12 @@ from audio_formatting import float_to_int16, pcm16_to_wav_bytes, SAMPLE_RATE
 STT_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
 STT_MODEL = "openai/whisper-large-v3-turbo"   # confirm exact slug on the Models page
 
+# A short hint to steady the transcriber. Whisper uses this as the "text that
+# came just before" — it nudges spelling/style toward casual conversation and
+# makes it less likely to invent formal phrasing from noisy 8kHz phone audio.
+# It is NOT a command; it just biases the decoder.
+STT_PROMPT = "A casual, friendly phone conversation."
+
 # Whisper hallucinates these on near-silence — they are NOT things the user
 # said. Same guard as in brains.clean_stt; we drop them at the source too.
 SILENCE_ARTIFACTS = {
@@ -29,7 +35,8 @@ SILENCE_ARTIFACTS = {
 }
 
 
-def transcribe(audio_f32: np.ndarray, language: str = "en") -> str | None:
+def transcribe(audio_f32: np.ndarray, language: str = "en",
+               prompt: str = STT_PROMPT) -> str | None:
     """Transcribe a float32 utterance. Returns text, or None if empty/junk."""
     if audio_f32 is None or len(audio_f32) == 0:
         return None
@@ -46,6 +53,7 @@ def transcribe(audio_f32: np.ndarray, language: str = "en") -> str | None:
             "input_audio": {"data": b64, "format": "wav"},
             "language": language,        # skip auto-detect -> a bit faster/steadier
             "temperature": 0,            # deterministic; no creative transcription
+            "prompt": prompt,            # bias toward casual speech (see STT_PROMPT)
         },
         timeout=30,   # upstream caps audio at 60s anyway; our turns are short
     )

@@ -14,10 +14,10 @@ feel of the agent:
     threshold   -> how confident Silero must be to count a frame as speech.
 """
 
+from config import SILENCE_TIMEOUT_MS
 import numpy as np
 import torch
 from silero_vad import load_silero_vad
-
 from audio_formatting import SAMPLE_RATE, VAD_FRAME_SAMPLES, FRAME_MS
 
 
