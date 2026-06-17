@@ -1,98 +1,100 @@
-"""Text-to-speech.
+"""TTS dispatcher — picks the backend and applies the fallback policy.
 
-Takes one sentence (from brain.respond's stream) and speaks it. Streams PCM so
-audio starts a fraction of a second after the request instead of after the
-whole sentence is synthesised — that, stacked on the brain's sentence chunking,
-is what makes the agent start talking almost immediately.
+Callers do `import tts; tts.synthesize(text, stop_event, persona)` and never care
+which engine ran. Both backends honour ONE contract — yield ready-to-send mu-law
+@ 8 kHz bytes — so they're interchangeable. Which is primary/fallback is
+config-driven (config.TTS_PRIMARY / TTS_FALLBACK), so flipping to all-Kokoro is a
+config change, not a code change.
 
-Boundary details that are pure correctness:
-  * SAMPLE RATE: TTS returns audio at the MODEL's rate (Kokoro / OpenAI voices
-    are 24 kHz), not the 16 kHz we capture at. Play at the wrong rate and the
-    voice is chipmunked or sludgy. Verify per model.
-  * SAMPLE ALIGNMENT: network chunks don't land on 2-byte (int16) boundaries,
-    so a sample can be split across two chunks. We carry the leftover byte.
-  * BARGE-IN: this plays WHILE the VAD keeps listening, so the playback loop
-    checks stop_event every chunk and cuts out instantly if the user speaks.
+    primary  = cartesia  (native mu-law 8k, no resample — fast, clean)
+    fallback = kokoro    (24k -> 8k -> mu-law; "always works" safety net)
+
+Two-tier fallback (the reason this file exists):
+
+  * QUOTA / AUTH errors (bad key, credits exhausted) won't fix themselves
+    mid-session. On the first one we set a STICKY flag and route THIS and every
+    later utterance straight to Kokoro. Without the flag, every turn would
+    re-attempt a dead Cartesia, fail, then fall back — paying that wasted
+    latency on every single turn. The flag clears only on process restart.
+
+  * TRANSIENT errors (timeout, dropped socket, one-off 5xx, rate-limit) might be
+    gone next turn. Fall back for THIS utterance only; keep Cartesia primary.
+
+  * MID-STREAM failure: if the primary already streamed some audio, we can't
+    un-speak it, so we don't restart the sentence on a different voice — log and
+    stop. (A sticky-class error mid-stream still trips the sticky flag so the
+    NEXT turn skips Cartesia.)
 """
 
-import numpy as np
-import sounddevice as sd
-from openai import OpenAI
+from cartesia import AuthenticationError, PermissionDeniedError
 
-from config import OPENROUTER_API_KEY
+import config
+import tts_cartesia
+import tts_kokoro
 
-client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_API_KEY)
+_BACKENDS = {"cartesia": tts_cartesia, "kokoro": tts_kokoro}
+PRIMARY = _BACKENDS[config.TTS_PRIMARY]
+FALLBACK = _BACKENDS[config.TTS_FALLBACK]
 
-TTS_MODEL = "hexgrad/kokoro-82m"
-TTS_VOICE = "af_bella"
-TTS_SAMPLE_RATE = 24000    # Kokoro & OpenAI-family PCM are 24 kHz. VERIFY per model.
-CHUNK_BYTES = 4096
+# Set when the primary hits a non-recoverable (quota/auth) error. Process-wide,
+# in-memory: stays set for the life of the server, cleared only by restart.
+_primary_disabled = False
 
 
-def synthesize(text: str, stop_event=None):
-    """Generator: synthesise `text`, yield raw int16 PCM @ 24 kHz as bytes.
+def _is_sticky(exc: Exception) -> bool:
+    """True for errors that won't recover mid-session (bad key, no credits).
 
-    This is the synth CORE, with no output device attached — the Twilio path
-    has no local speaker, it pipes these bytes through resample -> mu-law ->
-    the phone. `speak()` (below) is the local-playback wrapper for offline
-    testing. Yielding bytes (not numpy) keeps the boundary simple: the Twilio
-    resampler (audioop) wants bytes, and `speak()` re-wraps them for sounddevice.
+    Auth (401) and permission/credits (402/403) are sticky. Rate-limit (429),
+    timeouts, connection drops and 5xx are TRANSIENT — they may clear next turn,
+    so they are NOT sticky."""
+    if isinstance(exc, (AuthenticationError, PermissionDeniedError)):
+        return True
+    # Belt-and-suspenders: any 401/402/403 even if surfaced as a generic error.
+    return getattr(exc, "status_code", None) in (401, 402, 403)
 
-    Each yielded chunk is a WHOLE number of int16 samples — the leftover-byte
-    carry below guarantees we never split a sample across two yields.
-    """
-    if not text or not text.strip():
+
+def synthesize(text: str, stop_event=None, persona: str = "eve"):
+    """Yield phone-ready mu-law @ 8 kHz bytes in `persona`'s voice, applying the
+    primary→fallback policy above."""
+    global _primary_disabled
+
+    # Straight to fallback when primary is known-dead (sticky) or when config
+    # makes primary and fallback the same backend (e.g. TTS_PRIMARY="kokoro").
+    if _primary_disabled or PRIMARY is FALLBACK:
+        yield from FALLBACK.synthesize(text, stop_event=stop_event, persona=persona)
         return
 
-    leftover = b""   # bytes carried over when a network chunk ends mid-sample
+    produced = False
+    try:
+        for chunk in PRIMARY.synthesize(text, stop_event=stop_event, persona=persona):
+            produced = True
+            yield chunk
+        return
+    except Exception as e:
+        sticky = _is_sticky(e)
+        if sticky:
+            _primary_disabled = True   # every future turn skips the dead primary
+        tag = "STICKY quota/auth" if sticky else "transient"
+        if produced:
+            # Already streamed audio — can't cleanly restart on another voice.
+            print(f"[tts] {PRIMARY.NAME} failed mid-stream [{tag}]: {e}")
+            return
+        print(f"[tts] {PRIMARY.NAME} failed before first chunk [{tag}] "
+              f"-> falling back to {FALLBACK.NAME}: {e}")
 
-    # with_streaming_response gives us the raw byte stream as it arrives,
-    # rather than buffering the whole audio file first.
-    with client.audio.speech.with_streaming_response.create(
-        model=TTS_MODEL,
-        voice=TTS_VOICE,
-        input=text,
-        response_format="pcm",       # raw int16 samples
-    ) as response:
-        for chunk in response.iter_bytes(chunk_size=CHUNK_BYTES):
-            # barge-in: stop the instant the user starts talking
-            if stop_event is not None and stop_event.is_set():
-                break
-            if not chunk:
-                continue
-
-            data = leftover + chunk
-            # network chunks don't land on 2-byte (int16) boundaries, so a
-            # sample can straddle two chunks. Emit only whole samples and carry
-            # the trailing odd byte forward — dropping it would desync every
-            # following sample by one byte and turn the rest into noise.
-            usable = len(data) - (len(data) % 2)
-            leftover = data[usable:]
-            if usable == 0:
-                continue
-
-            yield data[:usable]
+    # Reached only when the primary errored with no audio emitted yet.
+    yield from FALLBACK.synthesize(text, stop_event=stop_event, persona=persona)
 
 
-def speak(text: str, stop_event=None):
-    """Synthesise `text` and play it through the default output device.
-
-    Thin wrapper around `synthesize()` for offline testing — opens a PortAudio
-    output stream and writes each PCM chunk as it arrives. Honours stop_event.
-    """
-    # OutputStream is the speaker side of PortAudio. dtype int16 because that's
-    # what PCM is; mono because the voice is mono.
-    with sd.OutputStream(samplerate=TTS_SAMPLE_RATE, channels=1,
-                         dtype="int16") as out:
-        for pcm_bytes in synthesize(text, stop_event=stop_event):
-            samples = np.frombuffer(pcm_bytes, dtype=np.int16)
-            out.write(samples.reshape(-1, 1))   # OutputStream wants (frames, channels)
+def speak(text: str, stop_event=None, persona: str = "eve"):
+    """Local-playback test via the same primary/fallback selection."""
+    try:
+        PRIMARY.speak(text, stop_event=stop_event, persona=persona)
+    except Exception as e:
+        print(f"[tts] {PRIMARY.NAME} speak failed; using {FALLBACK.NAME}: {e}")
+        FALLBACK.speak(text, stop_event=stop_event, persona=persona)
 
 
-# ---------------------------------------------------------------------------
-# STANDALONE TEST — `python tts.py` speaks a line. If it sounds too fast/slow,
-# it's a TTS_SAMPLE_RATE mismatch (the classic PCM bug), not a code bug.
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    speak("hey, this is a streaming voice test... if i sound chipmunky, "
-          "the sample rate is wrong — fix that first.")
+    speak("this is the active text to speech backend, "
+          "whichever one answered first.")

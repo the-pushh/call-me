@@ -29,7 +29,7 @@ from config import SILENCE_TIMEOUT_MS, MIN_UTTERANCE_MS
 import numpy as np
 
 from audio_formatting import int16_to_float, float_to_int16, SAMPLE_RATE
-from twilio_audio import mulaw_to_pcm16, pcm16_to_mulaw, Resampler, FrameAccumulator
+from twilio_audio import mulaw_to_pcm16, Resampler, FrameAccumulator
 from brains import Brain
 from stt import transcribe
 import tts
@@ -65,10 +65,11 @@ class CallSession:
 
         self.brain = Brain(persona)
 
-        # Resamplers: ONE instance each, reused for the whole call so ratecv's
-        # filter state stays continuous (no clicks at chunk boundaries).
+        # Inbound resampler: ONE instance, reused for the whole call so ratecv's
+        # filter state stays continuous (no clicks at chunk boundaries). The
+        # outbound side needs no resampler now — tts.synthesize hands back
+        # mu-law 8 kHz already (Cartesia native; Kokoro converts internally).
         self.in_rs = Resampler(8000, 16000)    # phone -> stack rate (for VAD/STT)
-        self.tts_rs = Resampler(24000, 8000)   # TTS rate -> phone rate
 
         self.acc = FrameAccumulator()
 
@@ -238,22 +239,25 @@ class CallSession:
                 break
 
     def _speak(self, text: str, on_first_audio=None):
-        """Synthesise one piece of text and push it to the phone as mu-law.
+        """Synthesise one piece of text and push it to the phone.
+
+        tts.synthesize already yields phone-ready mu-law @ 8 kHz (the backend
+        does any resample/codec), so we just queue each chunk as-is.
 
         If given, on_first_audio() is called the moment the first audio chunk is
         queued — used to time how fast sound starts coming out.
         """
-        for pcm24 in tts.synthesize(text, stop_event=self.turn_stop):
+        for mulaw in tts.synthesize(text, stop_event=self.turn_stop, persona=self.persona):
             if self.stop_event.is_set():
                 break
-            self.outbound_q.put(pcm16_to_mulaw(self.tts_rs.process(pcm24)))
+            self.outbound_q.put(mulaw)
             if on_first_audio is not None:
                 on_first_audio()
                 on_first_audio = None
 
     def _queue_filler(self):
         """Queue one pre-made filler clip, if any are built yet."""
-        chunks = audio_cache.get_filler()
+        chunks = audio_cache.get_filler(self.persona)
         if not chunks:
             return
         for chunk in chunks:

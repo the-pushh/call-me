@@ -19,41 +19,49 @@ import random
 import threading
 
 import tts
-from twilio_audio import Resampler, pcm16_to_mulaw
-from greetings import pick_greeting
+from greetings import GREETINGS, pick_greeting
 
 
-def _synth_to_mulaw_chunks(text: str) -> list[bytes]:
-    """Synthesise `text` and return it as ready-to-send mu-law chunks.
+def _synth_to_mulaw_chunks(text: str, persona: str) -> list[bytes]:
+    """Synthesise `text` in `persona`'s voice, return ready-to-send mu-law chunks.
 
-    Same outbound path the live loop uses (24k PCM -> resample 8k -> mu-law),
-    just done ahead of time. One Resampler for the whole clip keeps its filter
-    state continuous (no clicks)."""
-    rs = Resampler(24000, 8000)
-    return [pcm16_to_mulaw(rs.process(pcm24)) for pcm24 in tts.synthesize(text)]
+    tts.synthesize already yields phone-ready mu-law @ 8 kHz (the backend does
+    any resample/codec), so this is just the live outbound path collected ahead
+    of time into a list."""
+    return list(tts.synthesize(text, persona=persona))
 
 
-# --- fillers (built once at startup) ---------------------------------------
+# --- fillers (built once at startup, PER PERSONA) --------------------------
 
 # A mix of pure sounds and tiny phrases — variety so it doesn't feel canned.
 FILLER_TEXTS = ["umm...", "hmm...", "uh...", "yeah so...", "okay so...", "right..."]
 
-_filler_cache: list[list[bytes]] = []
+# persona -> list of filler clips (each clip a list of mu-law chunks). Keyed by
+# persona because a filler must be in the SAME voice as the answer that follows
+# it — otherwise the caller hears "umm" in one voice and the reply in another.
+_filler_cache: dict[str, list[list[bytes]]] = {}
 
 
-def build_fillers():
-    """Synthesise every filler once. Call at server startup (it's slow — it hits
-    the TTS service once per filler — but it only runs at boot)."""
+def build_fillers(personas=None):
+    """Synthesise every filler for every persona once, at server startup. Slow
+    (one TTS call per filler per persona) but boot-only. Defaults to all personas
+    that have greetings defined."""
     global _filler_cache
-    _filler_cache = [_synth_to_mulaw_chunks(t) for t in FILLER_TEXTS]
-    print(f"[audio_cache] built {len(_filler_cache)} fillers")
+    personas = personas or list(GREETINGS.keys())
+    _filler_cache = {
+        p: [_synth_to_mulaw_chunks(t, p) for t in FILLER_TEXTS]
+        for p in personas
+    }
+    total = sum(len(v) for v in _filler_cache.values())
+    print(f"[audio_cache] built {total} fillers across {len(_filler_cache)} personas")
 
 
-def get_filler() -> list[bytes] | None:
-    """A random pre-made filler's mu-law chunks, or None if not built yet."""
-    if not _filler_cache:
+def get_filler(persona: str) -> list[bytes] | None:
+    """A random pre-made filler in `persona`'s voice, or None if not built yet."""
+    clips = _filler_cache.get(persona)
+    if not clips:
         return None
-    return random.choice(_filler_cache)
+    return random.choice(clips)
 
 
 # --- greeting pre-warm (built during the ring, keyed by call id) ------------
@@ -66,7 +74,7 @@ def prewarm_greeting(call_sid: str, persona: str):
     """Pick + synthesise the opener for this call and stash it. Run this in the
     background right after placing the call, so it finishes during the ring."""
     text = pick_greeting(persona)
-    chunks = _synth_to_mulaw_chunks(text)
+    chunks = _synth_to_mulaw_chunks(text, persona)
     with _lock:
         _greeting_cache[call_sid] = (text, chunks)
     print(f"[audio_cache] pre-warmed greeting for {call_sid}: {text!r}")
