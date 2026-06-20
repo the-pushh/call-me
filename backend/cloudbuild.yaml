@@ -1,23 +1,24 @@
 steps:
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'asia-south1-docker.pkg.dev/$PROJECT_ID/callme-backend/fastapi-backend:$SHORT_SHA', './backend']
+    args: ['build', '-t', 'asia-south1-docker.pkg.dev/$PROJECT_ID/callme-backend/callme-api:$SHORT_SHA', './backend']
 
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'asia-south1-docker.pkg.dev/$PROJECT_ID/callme-backend/fastapi-backend:$SHORT_SHA']
+    args: ['push', 'asia-south1-docker.pkg.dev/$PROJECT_ID/callme-backend/callme-api:$SHORT_SHA']
 
-  - name: 'us-docker.pkg.dev/google.com/cloudsdktool/cloud-sdk'
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
     entrypoint: gcloud
     args:
       - 'run'
       - 'deploy'
-      - 'fastapi-backend'
-      - '--image=asia-south1-docker.pkg.dev/$PROJECT_ID/callme-backend/fastapi-backend:$SHORT_SHA'
+      - 'callme-api'
+      - '--image=asia-south1-docker.pkg.dev/$PROJECT_ID/callme-backend/callme-api:$SHORT_SHA'
       - '--region=asia-south1'
       - '--platform=managed'
       - '--allow-unauthenticated'
+      - '--set-secrets=OPENAI_API_KEY=OPENAI_API_KEY:latest,TWILIO_AUTH_TOKEN=TWILIO_AUTH_TOKEN:latest'
 
 images:
-  - 'asia-south1-docker.pkg.dev/$PROJECT_ID/callme-backend/fastapi-backend:$SHORT_SHA'
+  - 'asia-south1-docker.pkg.dev/$PROJECT_ID/callme-backend/callme-api:$SHORT_SHA'
 
 options:
   logging: CLOUD_LOGGING_ONLY
