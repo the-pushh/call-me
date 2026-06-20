@@ -2,58 +2,45 @@
 
 Ever wanted to *actually* call someone who isn't real and have a genuine, real-time conversation? That's this project.
 
-`call-me` dials a real phone number with Twilio, and on the other end is an AI persona — right now it's **Eve**, a Led Zeppelin-loving, slightly chaotic friend who talks like she's texting you out loud. You talk, she listens, she thinks, she talks back — all streamed live so it feels like an actual phone call, not a slow chatbot ping-pong match. The frontend even looks like you're staring at your iPhone's call screen while it happens.
+`call-me` rings your phone, and on the other end is an AI persona — like **Eve**, a Led Zeppelin-loving, slightly chaotic friend who talks like she's texting you out loud. You talk, she listens, she thinks, she talks back — live, so it feels like a real phone call instead of a slow chatbot back-and-forth. The screen even looks like your iPhone's call screen while it's happening.
 
-Under the hood it's a full voice AI pipeline: your voice gets transcribed (STT), fed to an LLM brain that writes in-character replies sentence by sentence, and spoken back (TTS) — fast enough that the *next* sentence is already being generated while the *current* one is still playing. That's what makes it feel alive instead of laggy.
+It feels alive because everything streams: as soon as she's said one sentence, the next is already on its way — no waiting for a wall of text, just a conversation.
+
+## Try it
+
+Head to **[callme.thepushh.com](https://callme.thepushh.com)**, pick a persona, drop in your number, and pick up when it rings.
 
 ## What's inside
 
-- **`backend/`** — FastAPI server. Handles the Twilio call, streams audio both ways, runs speech-to-text, voice activity detection, the LLM "brain," and text-to-speech.
-- **`frontend/`** — Next.js app styled like an iPhone call screen, so triggering and watching a call feels native.
+- **`backend/`** — the engine room: takes the call, listens to you, figures out what to say in character, and says it back, all in real time.
+- **`frontend/`** — the iPhone-style call screen you use to start a call and watch it unfold.
 
-## Run it locally
-
-You'll need a [Twilio](https://www.twilio.com/) account (for the phone call) and an [OpenRouter](https://openrouter.ai/) API key (for the LLM brain).
-
-### Backend
-
-```bash
-cd backend
-python -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-Create a `.env` file in `backend/` with:
+## How a call flows
 
 ```
-TWILLIO_SID=your_twilio_account_sid
-TWILLIO_AUTH_TOKEN=your_twilio_auth_token
-FROM_NUMBER=your_twilio_phone_number
-PUBLIC_BASE_URL=your_public_https_url
-OPENROUTER_API_KEY=your_openrouter_key
+you talk → phone → Twilio → backend
+   listen → detect you stopped → transcribe → think (in character) → speak
+backend → Twilio → phone → you hear the reply
 ```
 
-`PUBLIC_BASE_URL` needs to be a publicly reachable HTTPS URL (e.g. via [ngrok](https://ngrok.com/)) so Twilio can reach your machine.
+Each sentence is spoken the moment it's ready, while the next one is still being written — that overlap is what kills the lag.
 
-Then start the server:
+## Tech stack
 
-```bash
-uvicorn main:app --reload
-```
+**The call itself**
+- **Twilio** — places the real phone call and streams audio both ways over a WebSocket.
 
-Want to chat with the persona without any phone call or audio at all? Just run:
+**The voice pipeline** (backend, Python)
+- **FastAPI + Uvicorn** — the server, with WebSockets carrying the live audio.
+- **Silero VAD** — listens for when *you* stop talking, so the bot knows it's its turn.
+- **Whisper** (`large-v3-turbo`, via OpenRouter) — turns your speech into text.
+- **Llama 3.1 8B** (via OpenRouter) — the "brain" that writes in-character replies sentence by sentence.
+- **Cartesia** — the primary voice (TTS); streams phone-ready audio with no conversion step.
+- **Kokoro** (via OpenRouter) — the always-on backup voice if Cartesia hiccups.
 
-```bash
-python brains.py
-```
+**The screen** (frontend)
+- **Next.js + React + TypeScript**, styled with **Tailwind**, with a live WebSocket feed so the transcript appears as the call happens.
 
-### Frontend
-
-```bash
-cd frontend
-bun install   # or npm install
-bun dev       # or npm run dev
-```
-
-Open [http://localhost:3000](http://localhost:3000) to see the call screen.
+**Where it runs**
+- Backend on **Google Cloud Run** (behind a load balancer, secrets in Secret Manager, deploys via Cloud Build).
+- Frontend on **Vercel**.
