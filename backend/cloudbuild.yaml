@@ -16,7 +16,7 @@ steps:
       - '--platform=managed'
       - '--allow-unauthenticated'
       - '--port=8000'
-      - '--set-secrets=FROM_NUMBER=FROM_NUMBER:latest,OPENROUTER_API_KEY=OPENROUTER_API_KEY:latest,PUBLIC_BASE_URL=PUBLIC_BASE_URL:latest,TWILLIO_AUTH_TOKEN=TWILLIO_AUTH_TOKEN:latest,TWILLIO_SID=TWILLIO_SID:latest'
+      - '--set-secrets=FROM_NUMBER=FROM_NUMBER:latest,OPENROUTER_API_KEY=OPENROUTER_API_KEY:latest,PUBLIC_BASE_URL=PUBLIC_BASE_URL:latest,TWILLIO_AUTH_TOKEN=TWILLIO_AUTH_TOKEN:latest,TWILLIO_SID=TWILLIO_SID:latest, CARTESIA_API_KEY=CARTESIA_API_KEY:latest'
 
 images:
   - 'asia-south1-docker.pkg.dev/$PROJECT_ID/callme-backend/callme-api:$SHORT_SHA'
