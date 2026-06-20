@@ -63,7 +63,7 @@ def read_root():
     return {"message": "Welcome to the Call-Me API!"}
 
 
-@app.post("/health")
+@app.get("/health")
 def health_check():
     return {"status": "healthy"}
 
