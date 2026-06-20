@@ -15,7 +15,7 @@ steps:
       - '--region=asia-south1'
       - '--platform=managed'
       - '--allow-unauthenticated'
-      - '--set-secrets=OPENAI_API_KEY=OPENAI_API_KEY:latest,TWILIO_AUTH_TOKEN=TWILIO_AUTH_TOKEN:latest'
+      - '--set-secrets=FROM_NUMBER=FROM_NUMBER:latest,OPENROUTER_API_KEY=OPENROUTER_API_KEY:latest,PUBLIC_BASE_URL=PUBLIC_BASE_URL:latest,TWILLIO_AUTH_TOKEN=TWILLIO_AUTH_TOKEN:latest,TWILLIO_SID=TWILLIO_SID:latest'
 
 images:
   - 'asia-south1-docker.pkg.dev/$PROJECT_ID/callme-backend/callme-api:$SHORT_SHA'
