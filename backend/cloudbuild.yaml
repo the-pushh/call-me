@@ -5,7 +5,7 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     args: ['push', 'asia-south1-docker.pkg.dev/$PROJECT_ID/callme-backend/fastapi-backend:$SHORT_SHA']
 
-  - name: 'gcr.io/google-cloud-sdk/cloud-sdk'
+  - name: 'us-docker.pkg.dev/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
       - 'run'
